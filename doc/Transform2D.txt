@@ -1,0 +1,195 @@
+TRANSFORM2D - COMO FOI FEITA A IMPLEMENTACAO
+============================================
+
+Arquivos: source/Transform2D.hpp (contrato) e source/Transform2D.cpp
+(implementacao). Depende de Vector2D.
+
+
+1. O QUE E O TRANSFORM2D
+------------------------
+Uma matriz 3x3 que representa uma transformacao afim em 2D: translacao
+(mover), rotacao (girar), escala (esticar) e qualquer combinacao delas.
+
+Por que 3x3 se o espaco e 2D? Porque translacao NAO e linear: nao da para
+representar "somar (tx,ty)" com uma matriz 2x2. Com uma terceira coordenada
+w (coordenadas homogeneas) a translacao vira uma multiplicacao tambem:
+  - PONTO:    [x, y, 1]  (w = 1, sofre translacao)
+  - DIRECAO:  [x, y, 0]  (w = 0, NAO sofre translacao)
+
+
+2. A CONVENCAO (A PARTE MAIS IMPORTANTE)
+----------------------------------------
+O contrato exige a convencao estilo DirectX:
+  1. Armazenamento ROW-MAJOR: m[linha][coluna].
+  2. Vetores sao VETORES-LINHA: o vetor fica a ESQUERDA da matriz: v * M.
+  3. Ponto = [x, y, 1]; direcao = [x, y, 0].
+  4. A TRANSLACAO fica na TERCEIRA LINHA: m[2][0] = tx, m[2][1] = ty.
+  5. A terceira coluna e sempre [0, 0, 1] (invariante).
+
+Formato geral:
+
+               | m00  m01  0 |
+    [x y w] *  | m10  m11  0 |
+               | m20  m21  1 |
+
+    x' = x*m00 + y*m10 + w*m20
+    y' = x*m01 + y*m11 + w*m21
+
+(Cada componente do resultado = vetor-linha "vezes" uma COLUNA da matriz.)
+
+Livros de matematica e OpenGL costumam usar a convencao oposta (vetor-
+coluna, M * v, translacao na terceira COLUNA). As matrizes de la sao as
+TRANSPOSTAS das daqui. Cuidado ao copiar formulas da internet!
+
+
+3. IMPLEMENTACAO, FUNCAO POR FUNCAO
+-----------------------------------
+
+3.0 Construtor / identidade
+
+  No .hpp, m ja tem um inicializador padrao com a identidade:
+      1 0 0
+      0 1 0
+      0 0 1
+  e o construtor e "= default". Entao "Transform2D t;" ja e a identidade,
+  que e a transformacao que nao faz nada (v * I = v). Todas as factories
+  partem dela e mudam so o necessario.
+
+3.1 translation(tx, ty)
+
+    Transform2D t;
+    t.m[2][0] = tx;
+    t.m[2][1] = ty;
+
+  Matriz:   1   0   0
+            0   1   0
+            tx  ty  1
+
+  Conferindo: [x y 1] * M = (x + tx, y + ty). Para direcao (w=0) a ultima
+  linha e multiplicada por 0, entao a direcao nao muda.
+
+3.2 rotation(angle_rad)
+
+    const float c = std::cos(angle_rad);
+    const float s = std::sin(angle_rad);
+    t.m[0][0] =  c;  t.m[0][1] = s;
+    t.m[1][0] = -s;  t.m[1][1] = c;
+
+  Matriz:   cos   sin  0
+           -sin   cos  0
+            0     0    1
+
+  - Angulo em RADIANOS (90 graus = pi/2). Positivo = anti-horario.
+  - Conferindo com 90 graus (cos=0, sin=1) no ponto (1,0):
+        x' = 1*0 + 0*(-1) = 0
+        y' = 1*1 + 0*0    = 1      -> (0,1). Girou anti-horario. Certo.
+  - O "-sin" fica embaixo a esquerda (m[1][0]). Na convencao de vetor-
+    coluna ele fica em cima a direita; e a transposta.
+  - Calculei cos e sin uma vez so e guardei em c e s.
+
+3.3 scale(sx, sy)
+
+    t.m[0][0] = sx;
+    t.m[1][1] = sy;
+
+  Matriz:   sx  0   0
+            0   sy  0
+            0   0   1
+
+  Resultado: (x*sx, y*sy). Escala sempre em relacao a ORIGEM.
+
+3.4 operator* (produto de matrizes = composicao)
+
+    Transform2D result;
+    for (int row = 0; row < 3; ++row)
+        for (int col = 0; col < 3; ++col)
+            result.m[row][col] = m[row][0] * rhs.m[0][col]
+                               + m[row][1] * rhs.m[1][col]
+                               + m[row][2] * rhs.m[2][col];
+
+  - Formula classica: elemento (i,j) = LINHA i de A "vezes" COLUNA j de B.
+  - ARMADILHA que evitei: "result" comeca como IDENTIDADE, nao como zero.
+    Se eu fizesse um terceiro laco com "+=", somaria em cima dos 1 da
+    diagonal e o resultado ficaria errado. Por isso cada elemento e
+    ATRIBUIDO de uma vez com "=".
+
+  ORDEM DE COMPOSICAO (muito importante):
+    Como v * (A * B) == (v * A) * B, a matriz A * B significa
+    "aplica A PRIMEIRO, depois B". Le-se da ESQUERDA para a DIREITA.
+
+    Exemplo (testado), ponto (1,0):
+      rotation(90) * translation(10,20):
+          gira   -> (0,1)
+          move   -> (10,21)
+      translation(10,20) * rotation(90):
+          move   -> (11,20)
+          gira   -> (-20,11)
+    Resultados diferentes: produto de matrizes NAO e comutativo.
+
+    Uso tipico em jogos (objeto no mundo):
+        world = scale * rotation * translation
+    = escala, depois gira em torno da propria origem, depois posiciona.
+
+3.5 operator*=
+
+    *this = *this * rhs;
+    return *this;
+
+  - Reusa operator*. O produto e calculado inteiro num objeto TEMPORARIO e
+    so depois copiado para *this.
+  - Isso torna seguro "t *= t" (aliasing): se eu escrevesse direto em m
+    durante o laco, leria valores que ja teriam sido alterados.
+  - Retorna referencia (Transform2D&), mesma convencao dos operadores
+    compostos do Vector2D.
+
+3.6 transform_point(point)   ->  [x, y, 1] * M
+
+    return Vector2D(
+        point.x * m[0][0] + point.y * m[1][0] + m[2][0],
+        point.x * m[0][1] + point.y * m[1][1] + m[2][1]);
+
+  - w = 1, entao a terceira linha (translacao) entra somada inteira.
+  - A terceira coluna nao e calculada: o resultado seria sempre 1
+    (invariante [0,0,1]), entao nao precisa.
+
+3.7 transform_vector(direction)   ->  [x, y, 0] * M
+
+    return Vector2D(
+        direction.x * m[0][0] + direction.y * m[1][0],
+        direction.x * m[0][1] + direction.y * m[1][1]);
+
+  - w = 0, entao a terceira linha seria multiplicada por 0: simplesmente
+    deixei de fora.
+  - Intuicao: a direcao "para frente" de uma nave nao muda quando ela muda
+    de lugar; so muda quando ela gira (ou e escalada).
+
+
+4. RECURSOS DE C++ USADOS NO CODIGO
+-----------------------------------
+  class / public:     class tem membros private por padrao; aqui tudo
+                      foi deixado public explicitamente.
+  float m[3][3]{...}  array 2D com inicializador padrao de membro.
+  static              metodo da classe, nao do objeto: chama-se
+                      Transform2D::rotation(a) sem ter um objeto. Usado
+                      nas "factories" (funcoes que fabricam objetos).
+  Transform2D::       operador de escopo na definicao no .cpp. "static"
+                      aparece so no .hpp, nao se repete no .cpp.
+  noexcept, [[nodiscard]], const, const&  -> ver doc/Vector2D.txt.
+  std::cos, std::sin  de <cmath>, angulo em radianos.
+  #include "Vector2D.hpp"  Transform2D usa Vector2D em transform_point e
+                      transform_vector.
+
+
+5. COMO TESTEI
+--------------
+Compilei com g++ -std=c++17 -Wall -Wextra -Wpedantic -Werror e testei:
+  - rotation(pi/2) leva (1,0) em (0,1)                 (anti-horario)
+  - translation(10,20) move o ponto (1,2) para (11,22)
+  - translation(10,20) NAO altera a direcao (1,2)
+  - translation guarda tx,ty em m[2][0], m[2][1]
+  - scale(2,3) leva (1,1) em (2,3)
+  - rotation * translation e translation * rotation (valores da secao 3.4)
+  - (S*R*T).transform_point(p) == T(R(S(p)))           (ordem esq -> dir)
+  - r *= r com r de 90 graus vira 180 graus: (1,0) -> (-1,0)
+  - identidade * T == T
+  - a terceira coluna continua [0,0,1] apos composicao

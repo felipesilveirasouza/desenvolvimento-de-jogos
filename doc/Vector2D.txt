@@ -1,0 +1,170 @@
+VECTOR2D - COMO FOI FEITA A IMPLEMENTACAO
+==========================================
+
+Arquivos: source/Vector2D.hpp (contrato) e source/Vector2D.cpp (implementacao)
+
+
+1. O QUE E O VECTOR2D
+---------------------
+Um vetor 2D com dois componentes float, x e y. O mesmo tipo e usado para
+duas coisas diferentes:
+  - PONTO (posicao): "onde" algo esta. Ex.: a posicao de um personagem.
+  - DIRECAO: "para onde" algo aponta ou se move. Ex.: velocidade.
+
+Invariante do contrato: x e y devem ser numeros finitos (nada de infinito
+ou NaN). Por isso as operacoes que poderiam gerar infinito (dividir por
+zero, normalizar o vetor zero) tem pre-condicoes.
+
+
+2. O QUE JA VEIO PRONTO NO .HPP
+-------------------------------
+Funcoes curtas e constexpr foram definidas direto no header:
+
+  length_squared()  ->  x*x + y*y
+      Comprimento ao quadrado. Serve para COMPARAR distancias sem calcular
+      a raiz quadrada (que e cara). Se a^2 < b^2 entao a < b (para a,b >= 0).
+
+  length()          ->  sqrt(length_squared())
+      Comprimento real (Pitagoras). Ex.: (3,4) tem comprimento 5.
+
+  dot(rhs)          ->  x*rhs.x + y*rhs.y
+      Produto escalar. Resultado = |a|*|b|*cos(angulo entre eles).
+        > 0  : apontam para o "mesmo lado"
+        = 0  : perpendiculares
+        < 0  : apontam para lados opostos
+
+  cross(rhs)        ->  x*rhs.y - y*rhs.x
+      "Produto vetorial" 2D (na verdade um escalar). Resultado =
+      |a|*|b|*sin(angulo).
+        > 0  : rhs esta a esquerda de this (sentido anti-horario)
+        < 0  : rhs esta a direita (sentido horario)
+        = 0  : paralelos
+      Ex.: (1,0).cross(0,1) = 1.
+
+Coube a mim implementar no .cpp tudo o que foi so DECLARADO no header.
+
+
+3. IMPLEMENTACAO, FUNCAO POR FUNCAO
+-----------------------------------
+
+3.1 normalized()
+
+    Vector2D Vector2D::normalized() const {
+        const float len = length();
+        assert(len > EPSILON && "cannot normalize a (near) zero vector");
+        return Vector2D(x / len, y / len);
+    }
+
+  - Divide cada componente pelo comprimento. O resultado tem a mesma
+    direcao e comprimento 1 ("vetor unitario").
+  - Pre-condicao do contrato: length() > EPSILON. O vetor zero nao tem
+    direcao; dividir por 0 daria infinito/NaN, quebrando a invariante.
+  - Usei assert (de <cassert>) para verificar a pre-condicao: em modo
+    debug o programa para com mensagem; em release (com -DNDEBUG) o assert
+    some e nao custa nada. A string com && e um truque comum: a string e
+    sempre "verdadeira", entao nao muda a condicao, mas aparece na mensagem
+    de erro.
+  - Guardei length() em "len" para calcular a raiz uma vez so.
+  - E const: nao altera o objeto, devolve uma COPIA.
+  - Pos-condicao: |resultado.length() - 1| < EPSILON.
+
+3.2 normalize()
+
+    void Vector2D::normalize() {
+        *this = normalized();
+    }
+
+  - Mesma coisa, mas altera o PROPRIO objeto (nao e const, retorna void).
+  - Reaproveitei normalized() em vez de repetir o codigo; assim a
+    verificacao da pre-condicao tambem e reaproveitada.
+  - "this" e um ponteiro para o objeto atual; "*this" e o proprio objeto.
+
+  Diferenca importante:
+      v.normalized();   // NAO muda v (e o [[nodiscard]] avisa!)
+      v.normalize();    // muda v
+
+3.3 equals()
+
+    bool Vector2D::equals(const Vector2D& rhs, float tolerance) const noexcept {
+        return std::abs(x - rhs.x) <= tolerance
+            && std::abs(y - rhs.y) <= tolerance;
+    }
+
+  - float tem erro de arredondamento: 0.1f + 0.2f nao e exatamente 0.3f.
+    Por isso nao se compara float com ==. Comparo se a diferenca de cada
+    componente e no maximo "tolerance".
+  - O valor padrao "= EPSILON" aparece SO na declaracao (no .hpp). Repetir
+    no .cpp e erro de compilacao.
+
+3.4 Operadores aritmeticos que criam um vetor novo: + - * /
+
+    Vector2D Vector2D::operator+(const Vector2D& rhs) const noexcept {
+        return Vector2D(x + rhs.x, y + rhs.y);
+    }
+
+  - Componente a componente: (a.x + b.x, a.y + b.y). O "-" e igual.
+  - "*" recebe um float (escalar): (x*s, y*s). Muda o tamanho do vetor
+    sem mudar a direcao (se s < 0, inverte o sentido).
+  - "/" divide pelo escalar. Tem pre-condicao |scalar| > EPSILON, entao
+    tem assert e NAO e noexcept (o contrato nao marcou como noexcept).
+  - Todos sao const: "a + b" nao altera a nem b; retorna um vetor novo.
+  - Retornam por VALOR (Vector2D), pois o resultado e um objeto novo.
+
+3.5 Operadores compostos: += -= *= /=
+
+    Vector2D& Vector2D::operator+=(const Vector2D& rhs) noexcept {
+        x += rhs.x;
+        y += rhs.y;
+        return *this;
+    }
+
+  - Alteram o proprio objeto, por isso NAO sao const.
+  - Retornam Vector2D& (REFERENCIA para o proprio objeto), por convencao
+    do C++: permite encadear, ex.: (a += b) *= 2, igual a tipos basicos.
+  - "/=" tem o mesmo assert que "/".
+
+3.6 Multiplicacao com escalar a esquerda (funcao livre)
+
+    Vector2D operator*(float scalar, const Vector2D& vec) noexcept {
+        return vec * scalar;
+    }
+
+  - "a * 2" chama o metodo a.operator*(2), porque o lado esquerdo e um
+    Vector2D.
+  - "2 * a" precisaria de 2.operator*(a), mas float nao tem metodos.
+    Solucao: uma funcao LIVRE (fora da struct) com os parametros
+    (float, Vector2D). Ela so troca a ordem e reusa o operador membro.
+
+
+4. RECURSOS DE C++ USADOS NO CODIGO
+-----------------------------------
+  struct             igual a class, mas os membros sao public por padrao.
+  float x{0.0f};     inicializador padrao de membro (C++11): todo
+                     Vector2D comeca com (0,0) se ninguem disser outra coisa.
+  = default          pede ao compilador que gere o construtor padrao.
+  : x(in_x), y(in_y) lista de inicializacao do construtor.
+  constexpr          a funcao pode ser avaliada em tempo de compilacao.
+  noexcept           promete que a funcao nao lanca excecao.
+  [[nodiscard]]      o compilador avisa se o valor de retorno for
+                     ignorado (C++17).
+  const (no metodo)  o metodo nao modifica o objeto.
+  const Vector2D&    passagem por referencia constante: nao copia e nao
+                     deixa modificar.
+  Vector2D::         operador de escopo: diz que a funcao definida no .cpp
+                     pertence a Vector2D.
+  #ifndef/#define    include guard: evita que o header seja incluido duas
+                     vezes na mesma unidade de compilacao.
+  assert             verificacao de pre-condicao em modo debug (<cassert>).
+  std::abs, std::sqrt  de <cmath>, versoes para float.
+
+
+5. COMO TESTEI
+--------------
+Compilei com g++ -std=c++17 -Wall -Wextra -Wpedantic -Werror e rodei
+testes com valores conhecidos:
+  - (3,4).length() == 5 e length_squared() == 25
+  - (3,4).normalized() == (0.6, 0.8), e normalize() gera comprimento 1
+  - (3,4) + (1,2) == (4,6);  (3,4) - (1,2) == (2,2)
+  - (3,4) * 2 == 2 * (3,4) == (6,8);  (3,4) / 2 == (1.5, 2)
+  - += -= *= /= encadeados dao o resultado esperado
+  - (3,4).dot(1,2) == 11;  (1,0).cross(0,1) == 1
