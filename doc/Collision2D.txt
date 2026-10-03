@@ -1,0 +1,121 @@
+COLLISION2D - COMO FOI FEITA A IMPLEMENTACAO
+============================================
+
+Arquivos: source/Collision2D.hpp (contrato) e source/Collision2D.cpp
+(implementacao). Depende de Vector2D e Global (TILE_SIZE).
+
+
+1. O QUE E
+----------
+Deteccao de colisao com AABB (Axis-Aligned Bounding Box): uma caixa
+retangular ALINHADA AOS EIXOS, ou seja, que nunca gira. E o teste de
+colisao mais simples e rapido que existe, e por isso o mais usado em jogos
+2D baseados em tiles.
+
+O header define duas structs:
+  - AABB:        a caixa em si, dada por dois cantos (min e max), em
+                 coordenadas do MUNDO.
+  - Collision2D: a "forma de colisao" de uma entidade, guardada como
+                 MEIA-largura e MEIA-altura (halfExtents). Nao guarda
+                 posicao; a posicao vem de fora (do RigidBody2D).
+
+O contrato diz que e "narrow-phase only": responde apenas "essas DUAS
+caixas se sobrepoem?". Decidir QUAIS pares testar (broad-phase, ex.:
+grade espacial) e outro problema, que nao faz parte desta classe.
+
+
+2. CONVENCOES (de Global.hpp)
+-----------------------------
+  - Coordenadas em PIXELS, float.
+  - O eixo Y CRESCE PARA BAIXO (convencao de tela). Por isso:
+        min = canto SUPERIOR ESQUERDO  (menor x, menor y)
+        max = canto INFERIOR DIREITO   (maior x, maior y)
+  - TILE_SIZE = 64. O tamanho padrao de tile, sprite e NPC e 64 x 64.
+  - Invariante da AABB: min.x <= max.x e min.y <= max.y.
+
+
+3. IMPLEMENTACAO
+----------------
+
+3.1 Collision2D::bounds(position)
+
+    AABB Collision2D::bounds(const Vector2D& position) const noexcept {
+        return AABB{ position - halfExtents, position + halfExtents };
+    }
+
+  - A caixa fica CENTRADA na posicao da entidade:
+        min = centro - meia_extensao
+        max = centro + meia_extensao
+  - Exemplo com o padrao (halfExtents = 32,32) e posicao (100,100):
+        min = (68, 68)   max = (132, 132)   -> caixa de 64 x 64.
+  - Usa os operadores + e - do Vector2D (fase anterior).
+  - AABB{ a, b } e inicializacao agregada: como AABB e uma struct sem
+    construtor, os valores entre chaves vao para os membros NA ORDEM em que
+    foram declarados (primeiro min, depois max).
+  - Por que guardar MEIA extensao e nao largura? Porque o calculo fica so
+    uma soma e uma subtracao, sem dividir por 2 a cada chamada.
+  - Como halfExtents e sempre >= 0, a invariante min <= max e garantida.
+
+  O valor padrao vem do header:
+      Vector2D halfExtents{ TILE_SIZE * 0.5f, TILE_SIZE * 0.5f };
+  Usa TILE_SIZE de Global.hpp em vez de escrever 32. Global.hpp diz que
+  ele e a UNICA fonte desses valores: nenhum arquivo deve redefini-los.
+
+3.2 AABB::intersects(other)
+
+    return min.x <= other.max.x && max.x >= other.min.x
+        && min.y <= other.max.y && max.y >= other.min.y;
+
+  IDEIA PRINCIPAL: duas caixas alinhadas aos eixos se sobrepoem SE E
+  SOMENTE SE seus intervalos se sobrepoem NOS DOIS EIXOS ao mesmo tempo.
+  Basta UM eixo com espaco entre elas para nao haver colisao (caso
+  particular do "Teorema do Eixo Separador", SAT).
+
+  Em um eixo so (uma dimensao), dois intervalos [aMin, aMax] e
+  [bMin, bMax] se sobrepoem quando:
+        aMin <= bMax   (A comeca antes de B terminar)
+     e  aMax >= bMin   (A termina depois de B comecar)
+
+      sobrepoe:     A [=======]
+                    B      [=======]
+
+      nao sobrepoe: A [====]
+                    B          [====]     (aMax < bMin)
+
+  E mais facil pensar ao contrario: NAO ha colisao se A esta toda a
+  esquerda de B (aMax < bMin) OU toda a direita (aMin > bMax). Negando
+  isso (lei de De Morgan) chega-se exatamente nas duas condicoes acima.
+
+  - <= e >= (em vez de < e >): o contrato diz que ENCOSTAR conta como
+    colisao. Ex.: caixa A com max.x = 132 e caixa B com min.x = 132 colidem.
+  - O teste e simetrico: a.intersects(b) == b.intersects(a).
+  - Funciona tambem quando uma caixa esta DENTRO da outra.
+  - O && do C++ e "curto-circuito": se a primeira condicao ja for falsa, as
+    outras nem sao avaliadas. Assim o teste para no primeiro eixo separado.
+
+
+4. RECURSOS DE C++ USADOS
+-------------------------
+  struct sem construtor  inicializacao agregada: AABB{ min, max }.
+  Vector2D halfExtents{ ... }  inicializador padrao de membro usando uma
+                         constante constexpr de outro header.
+  constexpr float TILE_SIZE    (em Global.hpp) constante de tempo de
+                         compilacao: substitui o antigo #define, mas tem
+                         tipo e respeita escopo.
+  #include "Global.hpp"  o header inclui direto o que usa, mesmo que
+                         Vector2D.hpp ja inclua: nao depende de include
+                         indireto. O include guard evita duplicacao.
+  &&                     E logico com curto-circuito.
+  const, noexcept, [[nodiscard]], const&  -> ver doc/Vector2D.txt.
+
+
+5. COMO TESTEI
+--------------
+g++ -std=c++17 -Wall -Wextra -Wpedantic -Werror, com o Global.hpp real.
+  - halfExtents padrao == (32,32)
+  - bounds((100,100)) == { (68,68), (132,132) }
+  - caixas sobrepostas colidem
+  - caixas que ENCOSTAM a borda (x=132) colidem; com 1 pixel de folga, nao
+  - folga so no eixo y tambem impede colisao
+  - cantos que se tocam contam como colisao
+  - caixa contida em outra colide; teste e simetrico

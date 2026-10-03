@@ -93,6 +93,8 @@ Coube a mim implementar no .cpp tudo o que foi so DECLARADO no header.
   - float tem erro de arredondamento: 0.1f + 0.2f nao e exatamente 0.3f.
     Por isso nao se compara float com ==. Comparo se a diferenca de cada
     componente e no maximo "tolerance".
+  - EPSILON vem de Global.hpp (fase 2) e vale 0.0001f. Global.hpp e a
+    unica fonte dessa constante: nenhum outro arquivo deve redefini-la.
   - O valor padrao "= EPSILON" aparece SO na declaracao (no .hpp). Repetir
     no .cpp e erro de compilacao.
 

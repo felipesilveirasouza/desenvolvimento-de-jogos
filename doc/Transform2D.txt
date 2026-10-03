@@ -83,6 +83,12 @@ TRANSPOSTAS das daqui. Cuidado ao copiar formulas da internet!
   - Conferindo com 90 graus (cos=0, sin=1) no ponto (1,0):
         x' = 1*0 + 0*(-1) = 0
         y' = 1*1 + 0*0    = 1      -> (0,1). Girou anti-horario. Certo.
+  - ATENCAO (Global.hpp, fase 2): no projeto o eixo Y cresce PARA BAIXO
+    (convencao de tela). "Anti-horario" acima vale com Y para cima, como
+    na matematica. Na TELA, com Y para baixo, a mesma conta leva (1,0)
+    (direita) para (0,1) (que agora e BAIXO): visualmente a rotacao
+    positiva aparece no sentido HORARIO. A matriz nao muda; muda so como
+    o resultado aparece desenhado.
   - O "-sin" fica embaixo a esquerda (m[1][0]). Na convencao de vetor-
     coluna ele fica em cima a direita; e a transposta.
   - Calculei cos e sin uma vez so e guardei em c e s.

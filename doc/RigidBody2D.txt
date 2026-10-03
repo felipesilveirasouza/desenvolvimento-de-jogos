@@ -1,0 +1,101 @@
+RIGIDBODY2D - COMO FOI FEITA A IMPLEMENTACAO
+============================================
+
+Arquivos: source/RigidBody2D.hpp (contrato) e source/RigidBody2D.cpp
+(implementacao). Depende de Vector2D.
+
+
+1. O QUE E
+----------
+O estado de movimento de um corpo, tratado como PONTO MATERIAL (sem
+rotacao, sem massa): posicao, velocidade e aceleracao. O nome
+"RigidBody2D" e a nomenclatura comum de engines de jogos (Unity, Godot);
+um corpo rigido de verdade tambem teria dinamica de rotacao, mas aqui
+nao tem, como o professor explicou no e-mail.
+
+  position      pixels                    onde o corpo esta
+  velocity      pixels por segundo        quanto a posicao muda por segundo
+  acceleration  pixels por segundo^2      quanto a velocidade muda por segundo
+
+A relacao fisica:  velocidade = derivada da posicao
+                   aceleracao = derivada da velocidade
+
+Os tres sao Vector2D e comecam em (0,0) gracas ao inicializador padrao de
+x e y no Vector2D.
+
+
+2. INTEGRACAO NUMERICA
+----------------------
+Num jogo o tempo nao e continuo: a simulacao avanca em passos de dt
+segundos (ex.: 1/60 s). "Integrar" e calcular o novo estado a partir do
+anterior, aproximando as derivadas.
+
+O jeito mais obvio e o EULER EXPLICITO:
+      position += velocity     * dt;   // usa a velocidade ANTIGA
+      velocity += acceleration * dt;
+
+O contrato pede o EULER SEMI-IMPLICITO (ou "simpletico"), em que so a
+ORDEM muda:
+      velocity += acceleration * dt;
+      position += velocity     * dt;   // usa a velocidade JA ATUALIZADA
+
+Parece detalhe, mas faz muita diferenca:
+  - O Euler explicito GANHA energia artificialmente a cada passo. Uma
+    orbita ou uma mola vai abrindo em espiral ate "explodir".
+  - O semi-implicito conserva a energia muito melhor (em media ela oscila,
+    mas nao cresce). E estavel para jogos e custa exatamente o mesmo.
+
+Exemplo numerico (testado): parado, aceleracao (0,10), dt = 1:
+      passo 1: velocity = (0,10)  position = (0,10)
+      passo 2: velocity = (0,20)  position = (0,30)
+  No Euler explicito o passo 1 daria position = (0,0), porque usaria a
+  velocidade antiga (zero).
+
+TIMESTEP FIXO: o contrato diz que integrate() e sempre chamado com o
+mesmo dt. Com dt variavel (o tempo real de cada frame), o resultado
+dependeria da velocidade do computador. Com dt fixo a simulacao e
+REPRODUZIVEL: mesma entrada, mesmo resultado, em qualquer maquina.
+
+
+3. IMPLEMENTACAO
+----------------
+
+    void RigidBody2D::integrate(float dt) noexcept {
+        assert(dt > 0.0f && "timestep must be positive");
+        velocity += acceleration * dt;
+        position += velocity * dt;
+    }
+
+  - Pre-condicao dt > 0 verificada com assert (mesmo padrao da fase
+    anterior). dt = 0 nao faria nada; dt negativo voltaria no tempo.
+  - assert dentro de funcao noexcept nao e problema: assert nao lanca
+    excecao, ele aborta o programa.
+  - "acceleration * dt" usa o operator*(float) do Vector2D; "+=" usa o
+    operator+= do Vector2D. Todo o trabalho vetorial ja estava pronto.
+  - NAO zerei a aceleracao depois de integrar: o contrato nao pede. Quem
+    controla a aceleracao (gravidade, input do jogador) decide o valor
+    a cada passo.
+
+  Ligacao com os excertos de forum do e-mail: os erros mostrados vem de
+  misturar essas grandezas. Ex.: colocar Position.X dentro de Velocity
+  (posicao nao e velocidade, unidades diferentes), ou esquecer de
+  multiplicar por delta/dt. Aqui cada grandeza tem seu campo e a unica
+  forma de ligar uma a outra e passando por dt, em integrate().
+
+
+4. RECURSOS DE C++ USADOS
+-------------------------
+  struct com membros Vector2D  composicao: um tipo feito de outros tipos.
+  assert (<cassert>)           pre-condicao em modo debug.
+  operadores sobrecarregados   v += a * dt le como a formula matematica.
+  noexcept                     ver doc/Vector2D.txt.
+
+
+5. COMO TESTEI
+--------------
+g++ -std=c++17 -Wall -Wextra -Wpedantic -Werror, com o Global.hpp real.
+  - aceleracao (0,10), dt=1: passo 1 -> v=(0,10), p=(0,10)
+                             passo 2 -> v=(0,20), p=(0,30)
+    (confirma que a posicao usa a velocidade NOVA)
+  - velocidade constante (5,0), sem aceleracao, 60 passos de 1/60 s:
+    posicao final (5,0), ou seja, 5 pixels em 1 segundo.
