@@ -1,0 +1,201 @@
+TILEMAP - COMO FOI FEITA A IMPLEMENTACAO
+========================================
+
+Arquivos: source/TileMap.hpp (contrato) e source/TileMap.cpp
+(implementacao). Depende de Global, Vector2D e Dungeon2D.
+
+
+1. O QUE E
+----------
+A MATRIZ DE TILES do jogo: um inteiro por celula, EMPTY_TILE (0) para
+livre e WALL_TILE (1) para parede (legenda em Global.hpp). Faz quatro
+coisas:
+  1. RASTERIZA uma Dungeon2D: transforma salas e corredores (retangulos)
+     em celulas da matriz;
+  2. salva e carrega a matriz em CSV;
+  3. consultas: tamanho, valor de uma celula, se e parede;
+  4. converte entre coordenadas do MUNDO (pixels, float) e INDICES de
+     celula (inteiros).
+
+
+2. ARMAZENAMENTO ROW-MAJOR
+--------------------------
+A matriz e guardada num UNICO std::vector<int>, linha apos linha:
+
+      indice = row * width + col
+
+  Ex.: width = 4
+        col:  0  1  2  3
+      row 0: [0][1][2][3]
+      row 1: [4][5][6][7]      celula (col=2, row=1) -> 1*4 + 2 = 6
+
+  Por que nao vector<vector<int>>? Um bloco so de memoria e mais rapido
+  (cache), mais simples de copiar, e permite data() devolver um ponteiro
+  para a matriz inteira (util para mandar para a GPU ou salvar de uma vez).
+
+  O inverso (usado em randomEmptyCell):
+      col = indice % width        row = indice / width
+
+  Os membros sao private (m_width, m_height, m_cells): quem esta de fora
+  so le pelos metodos, entao a matriz nunca fica com tamanho inconsistente.
+
+
+3. IMPLEMENTACAO
+----------------
+
+3.1 loadFromDungeon(dungeon)
+    m_width  = dungeon.width;
+    m_height = dungeon.height;
+    m_cells.assign(m_width * m_height, WALL_TILE);   // tudo parede
+    carveLeaves(... *dungeon.root);                  // salas
+    for (const Corridor& c : dungeon.corridors) carve(..., c);  // corredores
+
+  - Exatamente o que o contrato descreve: dimensiona, enche de parede e
+    "escava" (carve) EMPTY_TILE nas salas das FOLHAS e nos corredores.
+  - carveLeaves e recursiva: desce a arvore e so escava a sala quando
+    chega numa folha (nos internos nao tem sala).
+  - carve(rect) usa os cantos INCLUSIVOS, a mesma regra do Dungeon2D:
+        for row = top .. bottom   (com <=)
+          for col = left .. right
+  - carve tambem RECORTA o retangulo aos limites do mapa (std::max /
+    std::min). O Dungeon2D nunca gera nada fora, mas assim um retangulo
+    errado jamais escreve fora do vetor.
+  - Se generate() nao foi chamado (root nulo), o mapa fica todo parede.
+  - "class Dungeon2D;" no .hpp e uma DECLARACAO ANTECIPADA (forward
+    declaration): o header so precisa saber que o tipo existe, porque usa
+    uma referencia. O #include "Dungeon2D.hpp" de verdade fica no .cpp.
+    Isso evita que quem inclui TileMap.hpp tenha que compilar Dungeon2D.
+
+3.2 saveCSV(path)
+    for (row...) {
+        for (col...) {
+            if (col > 0) file << ',';
+            file << at(col, row);
+        }
+        file << '\n';
+    }
+    return static_cast<bool>(file);
+
+  - Formato exigido: uma linha por linha da matriz, numeros separados por
+    UMA virgula, SEM virgula no final. O truque: escrever a virgula ANTES
+    de cada valor, menos do primeiro. Assim nunca sobra virgula no fim.
+  - Ex.: 1,1,1
+         1,0,1
+  - std::ofstream (arquivo de saida); "if (!file)" detecta que nao abriu
+    (ex.: pasta inexistente). No fim, converter o stream para bool diz se
+    alguma escrita falhou.
+
+3.3 loadCSV(path)
+  - Le linha por linha com std::getline.
+  - Cada linha e lida por parseRow, que e ESTRITA: so aceita
+    numero,numero,...,numero. Rejeita espaco, campo vazio ("1,,0"),
+    virgula no final, separador errado (";") e texto ("a,b").
+  - Todas as linhas precisam ter a mesma quantidade de numeros.
+  - Arquivo vazio ou inexistente => false.
+  - Unica tolerancia: um '\r' no fim da linha e removido, porque arquivos
+    salvos no Windows terminam linhas com "\r\n".
+
+  GARANTIA DO CONTRATO: "em caso de falha o mapa fica inalterado".
+  Para isso a leitura vai toda para variaveis LOCAIS (cells, width,
+  height). So no final, se tudo deu certo, copia para os membros:
+        m_cells = std::move(cells);
+  Se der erro no meio, a funcao retorna false sem nunca ter tocado em
+  m_cells. (Isso se chama "garantia forte": ou tudo, ou nada.)
+  std::move transfere o conteudo do vetor local sem copiar elemento por
+  elemento.
+
+  parseRow usa std::from_chars (C++17, <charconv>):
+        auto [next, error] = std::from_chars(p, end, value);
+  - Converte texto em int a partir de p e devolve ONDE parou (next) e se
+    deu erro. Diferente de atoi/stoi, nao ignora espacos, nao lanca
+    excecao e nao depende de locale: perfeito para formato estrito.
+  - "auto [next, error] = ..." e STRUCTURED BINDING (C++17): desmonta a
+    struct de retorno em duas variaveis com nome.
+  - Depois de cada numero: se chegou ao fim da linha, acabou (ok); se o
+    proximo caractere nao e ',' ou a ',' e o ultimo caractere (virgula no
+    final), e erro.
+
+3.4 Consultas: width(), height(), at(), isWall(), data()
+  - at(col, row) => m_cells[row * m_width + col], com assert verificando
+    a pre-condicao (indices dentro do mapa).
+  - isWall reutiliza at(): at(col,row) == WALL_TILE.
+  - data() => m_cells.data(), ponteiro para o primeiro int do vetor.
+  - Contas de indice em std::size_t (tipo de tamanho de vetor) para nao
+    estourar int em mapas enormes e nao gerar aviso de sinal.
+
+3.5 toIndices(world, col, row)  - mundo (pixels) -> celula
+    col = static_cast<int>(std::floor(world.x / TILE_SIZE));
+    row = static_cast<int>(std::floor(world.y / TILE_SIZE));
+
+  - Formula exata de Global.hpp. Com TILE_SIZE = 64: x de 0 ate 63.99
+    cai na coluna 0; x = 64 ja e coluna 1.
+  - POR QUE floor E NAO SO (int)? O cast para int TRUNCA em direcao a
+    zero: (int)(-0.5f) == 0, mas -0.5 esta na celula -1. floor arredonda
+    sempre para BAIXO: floor(-0.5) == -1. Importa quando algo sai do mapa
+    pela esquerda ou por cima.
+  - col e row sao parametros de SAIDA, passados por referencia (int&): a
+    funcao escreve nas variaveis de quem chamou.
+  - Nao verifica limites: uma posicao fora do mapa gera indices fora do
+    mapa, e quem chama decide o que fazer (o contrato nao exige mais).
+
+3.6 toWorld(col, row)  - celula -> mundo (CENTRO da celula)
+    Vector2D((col + 0.5f) * TILE_SIZE, (row + 0.5f) * TILE_SIZE)
+
+  - Tambem a formula de Global.hpp. Celula (0,0) -> (32,32); (2,1) ->
+    (160,96). O +0.5 leva do canto superior esquerdo para o centro.
+  - toIndices(toWorld(c, r)) devolve (c, r) de novo (os testes conferem).
+
+3.7 randomEmptyCell(col, row)
+  - Junta os indices de todas as celulas vazias num vetor e sorteia um
+    deles: cada celula vazia tem a mesma chance.
+  - assert: pre-condicao "existe pelo menos uma celula vazia".
+  - O contrato NAO recebe semente e o metodo e const. Por isso usei um
+    gerador "static" local:
+        static std::mt19937 rng{ std::random_device{}() };
+    "static" dentro da funcao: e criado so na PRIMEIRA chamada e continua
+    existindo entre chamadas. std::random_device{}() pega um numero de
+    entropia do sistema operacional para a semente.
+    Consequencia: ao contrario da masmorra, este sorteio muda a cada
+    execucao do programa. Se o jogo precisar ser reproduzivel (ex.: onde
+    o jogador nasce), o contrato teria que receber uma semente ou um
+    gerador. Bom ponto para perguntar ao professor.
+  - Aqui uso std::uniform_int_distribution normalmente, porque nao ha
+    reprodutibilidade a preservar.
+
+
+4. RECURSOS DE C++ USADOS
+-------------------------
+  private: + m_ prefixo   encapsulamento; m_ marca "membro".
+  std::vector::assign(n, v)  redimensiona para n e preenche com v.
+  for (const Corridor& c : v)  range-based for: percorre o vetor sem
+                         copiar cada elemento.
+  std::ofstream / std::ifstream / std::getline  arquivos em <fstream>.
+  std::from_chars        conversao texto -> numero estrita (C++17).
+  auto [a, b] = ...      structured binding (C++17).
+  std::move              transfere recursos em vez de copiar.
+  int& col               parametro de saida por referencia.
+  static (local)         variavel que sobrevive entre chamadas.
+  std::random_device     fonte de entropia do sistema.
+  std::floor             arredonda para baixo (<cmath>).
+  static_cast<T>(x)      conversao explicita de tipo, visivel no codigo.
+  class Dungeon2D;       declaracao antecipada.
+  namespace { ... }      funcoes auxiliares privadas do .cpp.
+
+
+5. COMO TESTEI
+--------------
+g++ -std=c++17 -Wall -Wextra -Wpedantic -Werror -fsanitize=address,undefined
+  - rasterizacao de 2400 masmorras (ver doc/Dungeon2D.txt): tamanho
+    correto, salas vazias, todas as celulas vazias conectadas;
+  - antes de generate(): mapa todo parede;
+  - CSV: salvar e carregar devolve o mesmo mapa; a primeira linha nao
+    termina em virgula e tem 60 numeros + 59 virgulas;
+  - loadCSV REJEITA e deixa o mapa intacto: virgula no final, linhas de
+    tamanho diferente, espaco, campo vazio, arquivo vazio, ';', texto,
+    linha em branco no meio e arquivo inexistente;
+  - loadCSV aceita final de linha do Windows (\r\n);
+  - saveCSV numa pasta inexistente retorna false;
+  - toIndices: (0,0)->(0,0); (63.9, 64)->(0,1); (-0.5,-64)->(-1,-1);
+  - toWorld: (0,0)->(32,32); (2,1)->(160,96); ida e volta preserva a celula;
+  - randomEmptyCell: 1000 sorteios, todos em celula vazia; num mapa com
+    uma unica celula vazia, sempre devolve ela.

@@ -1,0 +1,244 @@
+DUNGEON2D - COMO FOI FEITA A IMPLEMENTACAO
+==========================================
+
+Arquivos: source/Dungeon2D.hpp (contrato) e source/Dungeon2D.cpp
+(implementacao). Nao depende das outras classes: trabalha so com inteiros.
+
+
+1. O QUE E
+----------
+Um gerador de cavernas/masmorras usando BSP (Binary Space Partitioning,
+particao binaria do espaco). Ele NAO desenha nada em matriz: produz so a
+GEOMETRIA, ou seja:
+  - uma arvore binaria (BSPNode) cujas folhas guardam uma sala cada;
+  - uma lista de corredores (std::vector<Corridor>).
+Transformar isso em tiles e trabalho do TileMap (ver doc/TileMap.txt).
+
+Tudo em UNIDADES DE TILE (indices inteiros de celula), nao em pixels.
+
+Restricoes que o contrato exige da geometria gerada:
+  - corredores com 3 tiles de largura;
+  - menor sala com 5 x 5 tiles;
+  - CONECTIVIDADE: de qualquer sala da para chegar em qualquer outra.
+  - mesma semente (seed) => mesma masmorra.
+
+
+2. A IDEIA DO BSP
+-----------------
+  1. Comeca com um retangulo do tamanho do mapa inteiro (a raiz).
+  2. Corta esse retangulo em dois, numa posicao aleatoria. Cada metade
+     vira um filho do no.
+  3. Repete o corte em cada filho, recursivamente, ate os pedacos ficarem
+     pequenos demais para cortar de novo.
+  4. Cada pedaco final (FOLHA) recebe uma sala, menor que o pedaco.
+  5. Liga as salas com corredores, subindo pela arvore.
+
+      +-----------+        +-----+-----+        +-----+-----+
+      |           |        |     |     |        |     |  B  |
+      |     A     |  --->  |  A1 | A2  |  --->  | A1  +-----+
+      |           |        |     |     |        |     |  C  |
+      +-----------+        +-----+-----+        +-----+-----+
+
+  Vantagem: como os pedacos nunca se sobrepoem, as salas tambem nunca se
+  sobrepoem, sem precisar testar colisao entre salas.
+
+
+3. DECISAO IMPORTANTE: CANTOS INCLUSIVOS
+----------------------------------------
+O contrato diz que Rect tem (left, top) e (right, bottom), com
+left <= right, mas nao diz se "right" e a ULTIMA celula ou a celula DEPOIS
+da ultima. Escolhi INCLUSIVO: o Rect cobre toda celula com
+      left <= col <= right   e   top <= row <= bottom.
+Logo:
+      largura = right - left + 1
+      altura  = bottom - top + 1
+Ex.: um corredor {10, 4, 12, 20} tem largura 12 - 10 + 1 = 3.
+O mapa inteiro e {0, 0, width-1, height-1}.
+Isso esta escrito no topo do .cpp e o TileMap usa a mesma regra.
+(Vale confirmar com o professor.)
+
+
+4. CONSTANTES
+-------------
+No .cpp, dentro de um namespace anonimo (so visiveis nesse arquivo):
+
+  MIN_ROOM_SIZE   = 5   menor lado de sala (contrato)
+  CORRIDOR_WIDTH  = 3   largura do corredor (contrato)
+  ROOM_MARGIN     = 1   parede deixada entre a sala e a borda do pedaco
+  MIN_REGION_SIZE = 5 + 2*1 = 7   menor pedaco que ainda cabe uma sala
+
+  A margem garante que salas de pedacos vizinhos nao "grudem" uma na
+  outra e que sempre exista parede na borda do mapa.
+
+  Nao coloquei em Global.hpp porque nao posso mudar os headers do
+  professor; e como nao estao listadas la, nao violam a regra de "unica
+  fonte" do Global.hpp.
+
+
+5. IMPLEMENTACAO, PASSO A PASSO
+-------------------------------
+
+5.1 Construtor
+    Dungeon2D::Dungeon2D(int widthTiles, int heightTiles)
+        : width(widthTiles), height(heightTiles) { assert(... > 0); }
+  So guarda o tamanho. root continua nulo ate generate().
+
+5.2 generate(seed)
+    std::mt19937 rng(seed);
+    corridors.clear();
+    root = std::make_unique<BSPNode>();
+    root->region = Rect{ 0, 0, width - 1, height - 1 };
+    split(*root, rng);
+    carveRooms(*root, rng);
+    connect(*root, rng, corridors);
+
+  - assert: o mapa precisa ter pelo menos 7 x 7, senao nem uma sala 5x5
+    com margem cabe e o contrato seria impossivel de cumprir.
+  - corridors.clear() e o novo root permitem chamar generate() de novo:
+    atribuir um unique_ptr novo DESTROI a arvore antiga automaticamente
+    (cada no destroi seus filhos). Nao ha delete manual em lugar nenhum.
+  - Tres fases separadas, cada uma uma funcao recursiva.
+
+5.3 Numeros aleatorios e a semente
+    int randomInt(std::mt19937& rng, int lo, int hi) {
+        return lo + rng() % (hi - lo + 1);
+    }
+  - std::mt19937 (Mersenne Twister) tem a sequencia de numeros FIXADA
+    pelo padrao C++: a mesma semente gera os mesmos numeros em qualquer
+    compilador.
+  - Por que nao std::uniform_int_distribution? Porque o padrao NAO fixa o
+    algoritmo dela: GCC, Clang e MSVC podem dar masmorras diferentes para a
+    mesma semente. Com o "%" a masmorra e a mesma em qualquer maquina.
+    (O "%" tem um vies minusculo, irrelevante aqui.)
+  - Toda a aleatoriedade vem de UM gerador, criado com a semente e passado
+    por referencia. Nada de rand() ou de estado global.
+
+5.4 split(node, rng)  - corte recursivo
+  - Pode cortar na vertical (ao longo de x) se largura >= 2*7 = 14, e na
+    horizontal se altura >= 14: os dois filhos precisam ter >= 7.
+  - Se nao pode cortar em nenhum, o no fica FOLHA e a recursao para.
+  - Escolha da direcao: se um lado e 25% maior que o outro, corta o lado
+    maior (evita pedacos finos e compridos); senao, sorteia.
+  - Posicao do corte: "cut" e a primeira celula do segundo filho.
+        cut sorteado em [left + 7, right + 1 - 7]
+        filho 1: left .. cut-1     (tamanho cut - left >= 7)
+        filho 2: cut  .. right     (tamanho right - cut + 1 >= 7)
+  - std::make_unique<BSPNode>() cria os filhos; o pai e o DONO deles.
+
+5.5 carveRooms(node, rng)  - uma sala por folha
+  - No interno: so desce para os filhos.
+  - Folha: sorteia o tamanho da sala entre 5 e (tamanho do pedaco - 2),
+    depois sorteia a posicao de forma que a sala fique dentro do pedaco
+    respeitando a margem de 1.
+  - Nos internos ficam com room = {0,0,0,0}, que o contrato diz ser
+    ignorado.
+
+5.6 connect(node, rng, corridors)  - corredores e CONECTIVIDADE
+  Para cada no INTERNO (de baixo para cima):
+    - escolhe uma sala qualquer da subarvore ESQUERDA (randomLeaf);
+    - escolhe uma sala qualquer da subarvore DIREITA;
+    - liga o centro de uma ao centro da outra com um corredor em "L".
+
+  Por que isso garante conectividade? Por INDUCAO:
+    - Uma folha (uma sala) esta conectada consigo mesma.
+    - Se a subarvore esquerda esta toda conectada e a direita tambem,
+      um corredor entre uma sala de cada lado conecta as duas metades.
+    - Subindo ate a raiz, tudo fica conectado.
+  Um corredor pode atravessar outras salas no caminho; isso so cria MAIS
+  ligacoes, nunca desconecta nada.
+
+  Contagem: n folhas => n-1 nos internos => n-1 ligacoes em "L"
+  => 2*(n-1) retangulos de corredor (os testes conferem isso).
+
+5.7 addCorridor  - o corredor em "L" com 3 de largura
+    half = 3 / 2 = 1     (o corredor e "centro +- 1")
+    perna horizontal: linha ay, de ax ate bx:
+        { min(ax,bx)-1, ay-1, max(ax,bx)+1, ay+1 }      altura 3
+    perna vertical: coluna bx, de ay ate by:
+        { bx-1, min(ay,by)-1, bx+1, max(ay,by)+1 }      largura 3
+
+  - As duas pernas contem o bloco 3x3 em volta do canto (bx, ay), entao
+    se encontram.
+  - Sorteia se faz primeiro horizontal ou primeiro vertical (trocando a e
+    b), para os "L" nao ficarem todos virados para o mesmo lado.
+  - Por que sai do CENTRO da sala? Como a sala tem >= 5 de lado, o centro
+    +-1 ainda esta dentro dela: o corredor entra na sala com a largura
+    inteira, sem ficar "pela metade" na quina.
+  - Corredores nunca saem do mapa: o centro de uma sala fica a pelo
+    menos 3 celulas da borda (margem 1 + meia sala 2), e o corredor so
+    avanca 1 para cada lado.
+
+
+6. RECURSOS DE C++ USADOS
+-------------------------
+  std::unique_ptr<BSPNode>  ponteiro "dono": libera o objeto sozinho
+                         quando e destruido ou reatribuido. Nao pode ser
+                         copiado, so movido. Por isso a arvore se libera
+                         inteira quando root e destruido.
+  std::make_unique<T>()  cria o objeto ja dentro de um unique_ptr (C++14).
+  !left && !right        unique_ptr converte para bool: true se nao nulo.
+  std::vector::push_back adiciona no fim do vetor (crescimento automatico).
+  std::mt19937           gerador pseudo-aleatorio do <random>.
+  namespace { ... }      namespace anonimo: funcoes e constantes visiveis
+                         so neste .cpp (substitui o "static" do C).
+  recursao               split, carveRooms, connect e randomLeaf seguem a
+                         forma da arvore.
+  const BSPNode&         randomLeaf devolve REFERENCIA para um no que ja
+                         existe (nada e copiado).
+  Corridor{ a, b, c, d } inicializacao agregada (Corridor e so outro nome
+                         para Rect, via "using").
+  std::min, std::max, std::swap  de <algorithm> / <utility>.
+  assert                 pre-condicoes em modo debug.
+
+
+7. COMO TESTEI
+--------------
+g++ -std=c++17 -Wall -Wextra -Wpedantic -Werror -fsanitize=address,undefined
+(o sanitizer acusa acesso fora da memoria, vazamento e comportamento
+indefinido). 8 tamanhos (de 7x7 ate 100x100, incluindo 7x150) x 300
+sementes = 2400 masmorras. Para cada uma:
+  - toda sala tem >= 5 x 5, fica dentro do seu pedaco e do mapa;
+  - todo corredor tem 3 de largura (ou altura) e fica dentro do mapa;
+  - numero de corredores == 2 * (folhas - 1);
+  - todas as celulas das salas ficam vazias no TileMap;
+  - CONECTIVIDADE: busca em largura (flood fill) a partir de uma celula
+    vazia alcanca TODAS as celulas vazias do mapa;
+  - mesma semente => mapa identico; semente diferente => mapa diferente;
+    gerar de novo com a semente antiga volta ao mapa antigo.
+
+Exemplo real (60 x 30, semente 42; '#' parede, '.' vazio):
+
+############################################################
+####......##########################################.......#
+####.......................................................#
+####.......................................................#
+####.......................................................#
+####......##.....###.......##.....########.................#
+####...#####.....###.......##.....########.................#
+####...#####.....###.......##.....########.................#
+##........####...###.......##.....########......###...######
+##........####...###.......##.....#########...#####...######
+##........####...#####...#####...##########...#####...######
+##........###.....####...#####...########......####...######
+##........###..............###...########......##.......####
+####...######..............##......######...............####
+####...######..............##......######...............####
+####...######.....##.......##......######...............####
+#.........###.....##.......##......######......##.......####
+#..................................######......##.......####
+#..................................################...######
+#.................................#################...######
+#.........###.....####...######...########......###...######
+####...######.....###.....#####...########......###........#
+####...######.....###.....####......######.................#
+#.........###.............####......######.................#
+#.........................####......######.................#
+#.........................####......######......######.....#
+#.........................####......######......######.....#
+#.........###.....###.....####......########################
+#.........###.....##########################################
+############################################################
+
+Observacao: o algoritmo corta ate nao poder mais, entao gera MUITAS
+salas pequenas. Para salas maiores e menos numerosas, basta aumentar o
+tamanho minimo de pedaco para cortar (ou parar de cortar ao acaso).
