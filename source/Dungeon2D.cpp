@@ -16,6 +16,12 @@ constexpr int ROOM_MARGIN     = 1;   ///< Wall cells kept between a room and its
 /// Smallest region side that still fits a room plus its margins.
 constexpr int MIN_REGION_SIZE = MIN_ROOM_SIZE + 2 * ROOM_MARGIN;
 
+/// Maximum tree depth: at most 2^4 = 16 rooms, whatever the map size.
+constexpr int MAX_DEPTH       = 4;
+/// From this depth on, a node may randomly stop splitting (1 chance in 4),
+/// so the rooms do not all have the same size.
+constexpr int EARLY_STOP_DEPTH = 3;
+
 [[nodiscard]] int rectWidth(const Rect& r) noexcept  { return r.right - r.left + 1; }
 [[nodiscard]] int rectHeight(const Rect& r) noexcept { return r.bottom - r.top + 1; }
 
@@ -29,15 +35,29 @@ constexpr int MIN_REGION_SIZE = MIN_ROOM_SIZE + 2 * ROOM_MARGIN;
     return lo + static_cast<int>(rng() % span);
 }
 
-/// Recursively splits node.region until no side can hold two regions.
-void split(BSPNode& node, std::mt19937& rng) {
+/// Position of a cut along a side that starts at `start` and has `length`
+/// cells. The cut is the first cell of the second child. It stays between
+/// 30% and 70% of the side (no thin strips) and leaves both children with
+/// at least MIN_REGION_SIZE cells.
+[[nodiscard]] int randomCut(std::mt19937& rng, int start, int length) {
+    const int lo = std::max(start + MIN_REGION_SIZE, start + length * 3 / 10);
+    const int hi = std::min(start + length - MIN_REGION_SIZE, start + length * 7 / 10);
+    return randomInt(rng, lo, hi);
+}
+
+/// Recursively splits node.region until it is too small to split or the
+/// maximum depth is reached.
+void split(BSPNode& node, std::mt19937& rng, int depth) {
     const int w = rectWidth(node.region);
     const int h = rectHeight(node.region);
     const bool canSplitVertically   = w >= 2 * MIN_REGION_SIZE;   // cut along x
     const bool canSplitHorizontally = h >= 2 * MIN_REGION_SIZE;   // cut along y
 
-    if (!canSplitVertically && !canSplitHorizontally) {
+    if (depth >= MAX_DEPTH || (!canSplitVertically && !canSplitHorizontally)) {
         return;   // stays a leaf
+    }
+    if (depth >= EARLY_STOP_DEPTH && randomInt(rng, 0, 3) == 0) {
+        return;   // random early stop: this region keeps one big room
     }
 
     // Prefer cutting the longer side, so regions do not become thin strips.
@@ -55,25 +75,23 @@ void split(BSPNode& node, std::mt19937& rng) {
     node.left->region  = node.region;
     node.right->region = node.region;
 
-    // The cut is the first cell of the second child; both children keep at
-    // least MIN_REGION_SIZE cells.
     if (vertical) {
-        const int cut = randomInt(rng, node.region.left + MIN_REGION_SIZE,
-                                       node.region.right + 1 - MIN_REGION_SIZE);
+        const int cut = randomCut(rng, node.region.left, w);
         node.left->region.right = cut - 1;
         node.right->region.left = cut;
     } else {
-        const int cut = randomInt(rng, node.region.top + MIN_REGION_SIZE,
-                                       node.region.bottom + 1 - MIN_REGION_SIZE);
+        const int cut = randomCut(rng, node.region.top, h);
         node.left->region.bottom = cut - 1;
         node.right->region.top   = cut;
     }
 
-    split(*node.left, rng);
-    split(*node.right, rng);
+    split(*node.left, rng, depth + 1);
+    split(*node.right, rng, depth + 1);
 }
 
-/// Places a random room (at least MIN_ROOM_SIZE per side) inside every leaf.
+/// Places a random room inside every leaf. Each side is at least half of
+/// the space available in the region (and never below MIN_ROOM_SIZE), so
+/// rooms fill a good part of their region.
 void carveRooms(BSPNode& node, std::mt19937& rng) {
     if (!node.isLeaf()) {
         carveRooms(*node.left, rng);
@@ -82,8 +100,10 @@ void carveRooms(BSPNode& node, std::mt19937& rng) {
     }
 
     const Rect& region = node.region;
-    const int roomW = randomInt(rng, MIN_ROOM_SIZE, rectWidth(region)  - 2 * ROOM_MARGIN);
-    const int roomH = randomInt(rng, MIN_ROOM_SIZE, rectHeight(region) - 2 * ROOM_MARGIN);
+    const int availW = rectWidth(region)  - 2 * ROOM_MARGIN;
+    const int availH = rectHeight(region) - 2 * ROOM_MARGIN;
+    const int roomW  = randomInt(rng, std::max(MIN_ROOM_SIZE, availW / 2), availW);
+    const int roomH  = randomInt(rng, std::max(MIN_ROOM_SIZE, availH / 2), availH);
 
     node.room.left   = randomInt(rng, region.left + ROOM_MARGIN,
                                       region.right - ROOM_MARGIN - roomW + 1);
@@ -93,13 +113,18 @@ void carveRooms(BSPNode& node, std::mt19937& rng) {
     node.room.bottom = node.room.top + roomH - 1;
 }
 
-/// A random leaf of the subtree rooted at node.
-[[nodiscard]] const BSPNode& randomLeaf(const BSPNode& node, std::mt19937& rng) {
+/// Appends every leaf of the subtree rooted at node.
+void collectLeaves(const BSPNode& node, std::vector<const BSPNode*>& out) {
     if (node.isLeaf()) {
-        return node;
+        out.push_back(&node);
+        return;
     }
-    return randomLeaf(randomInt(rng, 0, 1) == 0 ? *node.left : *node.right, rng);
+    collectLeaves(*node.left, out);
+    collectLeaves(*node.right, out);
 }
+
+[[nodiscard]] int centreX(const Rect& r) noexcept { return (r.left + r.right) / 2; }
+[[nodiscard]] int centreY(const Rect& r) noexcept { return (r.top + r.bottom) / 2; }
 
 /// Adds an L-shaped corridor (two rectangles) joining cells a and b.
 void addCorridor(int ax, int ay, int bx, int by, std::mt19937& rng,
@@ -121,9 +146,9 @@ void addCorridor(int ax, int ay, int bx, int by, std::mt19937& rng,
                                   bx + half, std::max(ay, by) + half });
 }
 
-/// For every internal node, joins one room of its left subtree to one room
-/// of its right subtree. By induction each subtree is connected, so the
-/// whole dungeon is connected.
+/// For every internal node, joins the CLOSEST pair of rooms between its left
+/// and right subtrees. By induction each subtree is connected, so the whole
+/// dungeon is connected; choosing the closest pair keeps corridors short.
 void connect(const BSPNode& node, std::mt19937& rng, std::vector<Corridor>& corridors) {
     if (node.isLeaf()) {
         return;
@@ -131,13 +156,30 @@ void connect(const BSPNode& node, std::mt19937& rng, std::vector<Corridor>& corr
     connect(*node.left, rng, corridors);
     connect(*node.right, rng, corridors);
 
-    const Rect& a = randomLeaf(*node.left, rng).room;
-    const Rect& b = randomLeaf(*node.right, rng).room;
+    std::vector<const BSPNode*> leftLeaves;
+    std::vector<const BSPNode*> rightLeaves;
+    collectLeaves(*node.left, leftLeaves);
+    collectLeaves(*node.right, rightLeaves);
+
+    const Rect* bestA = nullptr;
+    const Rect* bestB = nullptr;
+    long long bestDistance = 0;
+    for (const BSPNode* l : leftLeaves) {
+        for (const BSPNode* r : rightLeaves) {
+            const long long dx = centreX(l->room) - centreX(r->room);
+            const long long dy = centreY(l->room) - centreY(r->room);
+            const long long distance = dx * dx + dy * dy;   // squared: no sqrt needed
+            if (!bestA || distance < bestDistance) {
+                bestA = &l->room;
+                bestB = &r->room;
+                bestDistance = distance;
+            }
+        }
+    }
 
     // Room centres. Rooms are >= 5 tiles per side, so centre +- 1 is still
     // inside the room and the corridor enters it along its full width.
-    addCorridor((a.left + a.right) / 2, (a.top + a.bottom) / 2,
-                (b.left + b.right) / 2, (b.top + b.bottom) / 2,
+    addCorridor(centreX(*bestA), centreY(*bestA), centreX(*bestB), centreY(*bestB),
                 rng, corridors);
 }
 
@@ -159,7 +201,7 @@ void Dungeon2D::generate(unsigned seed) {
     root = std::make_unique<BSPNode>();   // replaces (and frees) any old tree
     root->region = Rect{ 0, 0, width - 1, height - 1 };
 
-    split(*root, rng);
+    split(*root, rng, 0);
     carveRooms(*root, rng);
     connect(*root, rng, corridors);
 }
