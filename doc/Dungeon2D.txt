@@ -29,7 +29,8 @@ Restricoes que o contrato exige da geometria gerada:
   2. Corta esse retangulo em dois, numa posicao aleatoria. Cada metade
      vira um filho do no.
   3. Repete o corte em cada filho, recursivamente, ate os pedacos ficarem
-     pequenos demais para cortar de novo.
+     pequenos demais para cortar de novo OU a arvore atingir a
+     profundidade maxima (4 niveis = no maximo 16 salas).
   4. Cada pedaco final (FOLHA) recebe uma sala, menor que o pedaco.
   5. Liga as salas com corredores, subindo pela arvore.
 
@@ -66,6 +67,9 @@ No .cpp, dentro de um namespace anonimo (so visiveis nesse arquivo):
   CORRIDOR_WIDTH  = 3   largura do corredor (contrato)
   ROOM_MARGIN     = 1   parede deixada entre a sala e a borda do pedaco
   MIN_REGION_SIZE = 5 + 2*1 = 7   menor pedaco que ainda cabe uma sala
+  MAX_DEPTH        = 4  profundidade maxima da arvore: <= 2^4 = 16 salas
+  EARLY_STOP_DEPTH = 3  a partir deste nivel, um no pode parar de cortar
+                        ao acaso (1 chance em 4), variando o tamanho das salas
 
   A margem garante que salas de pedacos vizinhos nao "grudem" uma na
   outra e que sempre exista parede na borda do mapa.
@@ -88,7 +92,7 @@ No .cpp, dentro de um namespace anonimo (so visiveis nesse arquivo):
     corridors.clear();
     root = std::make_unique<BSPNode>();
     root->region = Rect{ 0, 0, width - 1, height - 1 };
-    split(*root, rng);
+    split(*root, rng, 0);      // 0 = profundidade da raiz
     carveRooms(*root, rng);
     connect(*root, rng, corridors);
 
@@ -113,31 +117,47 @@ No .cpp, dentro de um namespace anonimo (so visiveis nesse arquivo):
   - Toda a aleatoriedade vem de UM gerador, criado com a semente e passado
     por referencia. Nada de rand() ou de estado global.
 
-5.4 split(node, rng)  - corte recursivo
+5.4 split(node, rng, depth)  - corte recursivo
   - Pode cortar na vertical (ao longo de x) se largura >= 2*7 = 14, e na
     horizontal se altura >= 14: os dois filhos precisam ter >= 7.
-  - Se nao pode cortar em nenhum, o no fica FOLHA e a recursao para.
+  - O no fica FOLHA (a recursao para) se:
+      * depth >= MAX_DEPTH (4), ou
+      * nao pode cortar em nenhuma direcao, ou
+      * depth >= 3 e o sorteio (1 em 4) mandou parar.
+    "depth" e passado como depth + 1 para os filhos: e assim que a funcao
+    recursiva sabe em que nivel da arvore esta.
   - Escolha da direcao: se um lado e 25% maior que o outro, corta o lado
     maior (evita pedacos finos e compridos); senao, sorteia.
-  - Posicao do corte: "cut" e a primeira celula do segundo filho.
-        cut sorteado em [left + 7, right + 1 - 7]
-        filho 1: left .. cut-1     (tamanho cut - left >= 7)
-        filho 2: cut  .. right     (tamanho right - cut + 1 >= 7)
+  - Posicao do corte (randomCut): "cut" e a primeira celula do segundo
+    filho. E sorteado entre 30% e 70% do lado, e tambem respeitando que
+    os dois filhos tenham >= 7:
+        lo = max(inicio + 7,           inicio + 30% do lado)
+        hi = min(inicio + lado - 7,    inicio + 70% do lado)
+        filho 1: inicio .. cut-1     filho 2: cut .. fim
+    Cortar perto do meio evita um filho enorme e outro fininho.
   - std::make_unique<BSPNode>() cria os filhos; o pai e o DONO deles.
 
 5.5 carveRooms(node, rng)  - uma sala por folha
   - No interno: so desce para os filhos.
-  - Folha: sorteia o tamanho da sala entre 5 e (tamanho do pedaco - 2),
-    depois sorteia a posicao de forma que a sala fique dentro do pedaco
-    respeitando a margem de 1.
+  - Folha: o espaco disponivel e o pedaco menos a margem dos dois lados
+    (avail = lado - 2). Sorteia cada lado da sala entre
+        max(5, avail / 2)  e  avail
+    ou seja, a sala ocupa pelo menos metade do pedaco (e nunca menos que
+    5). Depois sorteia a posicao de forma que a sala fique dentro do
+    pedaco respeitando a margem de 1.
   - Nos internos ficam com room = {0,0,0,0}, que o contrato diz ser
     ignorado.
 
 5.6 connect(node, rng, corridors)  - corredores e CONECTIVIDADE
   Para cada no INTERNO (de baixo para cima):
-    - escolhe uma sala qualquer da subarvore ESQUERDA (randomLeaf);
-    - escolhe uma sala qualquer da subarvore DIREITA;
+    - junta todas as salas da subarvore ESQUERDA (collectLeaves);
+    - junta todas as salas da subarvore DIREITA;
+    - testa todos os pares (uma de cada lado) e fica com o par de centros
+      MAIS PROXIMOS (distancia ao quadrado, dx*dx + dy*dy: nao precisa de
+      sqrt so para comparar);
     - liga o centro de uma ao centro da outra com um corredor em "L".
+  Ligar as mais proximas deixa os corredores curtos, entre salas vizinhas.
+  A distancia e calculada em long long so por seguranca contra estouro.
 
   Por que isso garante conectividade? Por INDUCAO:
     - Uma folha (uma sala) esta conectada consigo mesma.
@@ -181,10 +201,12 @@ No .cpp, dentro de um namespace anonimo (so visiveis nesse arquivo):
   std::mt19937           gerador pseudo-aleatorio do <random>.
   namespace { ... }      namespace anonimo: funcoes e constantes visiveis
                          so neste .cpp (substitui o "static" do C).
-  recursao               split, carveRooms, connect e randomLeaf seguem a
-                         forma da arvore.
-  const BSPNode&         randomLeaf devolve REFERENCIA para um no que ja
-                         existe (nada e copiado).
+  recursao               split, carveRooms, connect e collectLeaves seguem
+                         a forma da arvore.
+  std::vector<const BSPNode*>  collectLeaves guarda PONTEIROS para os nos
+                         (nada e copiado; a arvore continua dona deles).
+  const Rect* bestA      ponteiro que comeca nulo (nullptr) e aponta para
+                         a melhor sala encontrada ate agora.
   Corridor{ a, b, c, d } inicializacao agregada (Corridor e so outro nome
                          para Rect, via "using").
   std::min, std::max, std::swap  de <algorithm> / <utility>.
@@ -195,12 +217,16 @@ No .cpp, dentro de um namespace anonimo (so visiveis nesse arquivo):
 --------------
 g++ -std=c++17 -Wall -Wextra -Wpedantic -Werror -fsanitize=address,undefined
 (o sanitizer acusa acesso fora da memoria, vazamento e comportamento
-indefinido). 8 tamanhos (de 7x7 ate 100x100, incluindo 7x150) x 300
-sementes = 2400 masmorras. Para cada uma:
-  - toda sala tem >= 5 x 5, fica dentro do seu pedaco e do mapa;
+indefinido). 9 tamanhos (de 7x7 ate 500x500, incluindo 7x150) x 150
+sementes = 1350 masmorras, mais 200 mapas grandes (ate 1000x750). Para
+cada uma:
+  - a raiz cobre o mapa inteiro;
+  - no maximo 16 salas; toda sala tem >= 5 x 5, fica dentro do seu pedaco
+    e do mapa;
   - todo corredor tem 3 de largura (ou altura) e fica dentro do mapa;
   - numero de corredores == 2 * (folhas - 1);
-  - todas as celulas das salas ficam vazias no TileMap;
+  - todas as celulas das salas E dos corredores ficam vazias no TileMap
+    (o teste do professor verifica exatamente isso);
   - CONECTIVIDADE: busca em largura (flood fill) a partir de uma celula
     vazia alcanca TODAS as celulas vazias do mapa;
   - mesma semente => mapa identico; semente diferente => mapa diferente;
@@ -209,36 +235,65 @@ sementes = 2400 masmorras. Para cada uma:
 Exemplo real (60 x 30, semente 42; '#' parede, '.' vazio):
 
 ############################################################
-####......##########################################.......#
-####.......................................................#
-####.......................................................#
-####.......................................................#
-####......##.....###.......##.....########.................#
-####...#####.....###.......##.....########.................#
-####...#####.....###.......##.....########.................#
-##........####...###.......##.....########......###...######
-##........####...###.......##.....#########...#####...######
-##........####...#####...#####...##########...#####...######
-##........###.....####...#####...########......####...######
-##........###..............###...########......##.......####
-####...######..............##......######...............####
-####...######..............##......######...............####
-####...######.....##.......##......######...............####
-#.........###.....##.......##......######......##.......####
-#..................................######......##.......####
-#..................................################...######
-#.................................#################...######
-#.........###.....####...######...########......###...######
-####...######.....###.....#####...########......###........#
-####...######.....###.....####......######.................#
-#.........###.............####......######.................#
-#.........................####......######.................#
-#.........................####......######......######.....#
-#.........................####......######......######.....#
-#.........###.....###.....####......########################
-#.........###.....##########################################
+##.........#########.............##############...........##
+##...............................####.....#####...........##
+##...............................####......####...........##
+##...............................####......####...........##
+##.........#########.............####......####...........##
+#####...############.............####......########...######
+#####...############.............#######...########...######
+###........#############################...########...######
+###........#############################...########...######
+###........############################.....#######...######
+###........############################.....#######...######
+###........############################....................#
+###........############################....................#
+#####...###############################....................#
+#####...###############################.....####...........#
+#####...####################......#####.....####...........#
+#####...#####.....##########......###################...####
+#.......#####.....##########......###################...####
+#.......#####.....##########......###################...####
+#.......#####.....###.....##............###########........#
+#.................###.....##............###########........#
+#.................###.....##............###########........#
+#.................................##......##.....##........#
+#############.....................##.......................#
+#############.....................##.......................#
+#############.....###.....##......##....................####
+#############.....###.....##########......##.....###########
+#############.....###.....##########......##.....###########
 ############################################################
 
-Observacao: o algoritmo corta ate nao poder mais, entao gera MUITAS
-salas pequenas. Para salas maiores e menos numerosas, basta aumentar o
-tamanho minimo de pedaco para cortar (ou parar de cortar ao acaso).
+
+8. INSPECAO VISUAL (sugestao do professor) E A CORRECAO
+-------------------------------------------------------
+Seguindo a sugestao do professor, fiz um programa pequeno que gera uma
+masmorra 500 x 500, carrega no TileMap, exporta com saveCSV e abre na
+planilha com formatacao condicional (1 = parede, 0 = vazio).
+
+A PRIMEIRA versao passava em todos os testes, mas visualmente parecia um
+LABIRINTO, nao uma masmorra: ~3000 salas minusculas e ~6000 corredores
+cruzando o mapa inteiro. Dois motivos:
+  1. O BSP cortava ate nao poder mais (todo pedaco >= 14 era dividido).
+     Num mapa grande isso gera milhares de folhas pequenas.
+  2. Cada corredor ligava uma sala SORTEADA de cada lado, que podia estar
+     na outra ponta da subarvore: corredores enormes atravessando tudo.
+
+Correcoes (as restricoes do contrato continuam valendo):
+  1. Profundidade maxima 4 (<= 16 salas) com parada aleatoria a partir
+     do nivel 3, corte entre 30% e 70% do lado, e sala ocupando pelo
+     menos metade do pedaco: poucas salas, grandes e variadas.
+  2. Corredor entre as salas MAIS PROXIMAS dos dois lados: corredores
+     curtos entre vizinhas.
+Resultado em 500 x 500: 9 a 16 salas por mapa, ligadas por corredores
+curtos (semente 42: 14 salas, 26 retangulos de corredor).
+
+Licao: passar nos testes automaticos nao garante que o resultado
+"parece certo". Os testes conferiam as regras (tamanho, largura,
+conectividade), mas so OLHANDO o mapa deu para ver que nao era uma
+masmorra.
+
+Para ajustar o visual: MAX_DEPTH controla quantas salas (2^MAX_DEPTH no
+maximo), e o "avail / 2" em carveRooms controla o quanto a sala ocupa
+do pedaco.
