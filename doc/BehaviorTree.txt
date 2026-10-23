@@ -1,0 +1,253 @@
+BEHAVIORTREE - COMO FOI FEITA A IMPLEMENTACAO
+=============================================
+
+Arquivos: source/BehaviorTree.hpp (contrato) e source/BehaviorTree.cpp
+(implementacao). So usa a biblioteca padrao: nao depende de nenhuma outra
+classe do projeto, entao pode ser testada sozinha.
+
+
+1. O QUE E
+----------
+O "cerebro" de um NPC. A cada passo do jogo (tick) a arvore recebe um
+CONTEXTO, uma lista de fatos sobre o mundo, e devolve UM COMANDO (string)
+dizendo o que o NPC deve fazer.
+
+    BTContext context = { {"NaPorta", 1}, {"PortaTrancada", 1} };
+    std::string comando = arvore.tick(context);   // "DestranquePorta"
+
+  - O CONTEXTO e um vector de pares (nome, inteiro). 0 = falso, qualquer
+    outro valor = verdadeiro. Fato que nao esta na lista = falso.
+  - A arvore e SEM ESTADO ("stateless"): nao lembra nada entre um tick e
+    outro. E reavaliada inteira, da raiz, a cada tick. Toda a "memoria"
+    (ex.: para que lado o NPC esta indo) fica no codigo do jogo, que
+    monta o contexto antes de cada tick.
+  - Quem chama (o jogo) e quem da significado ao comando: a arvore so
+    devolve o texto "AndeParaA"; o jogo e que faz x = x + 1.
+
+Vantagem sobre uma maquina de estados (FSM), segundo o PDF da aula: numa
+FSM as transicoes ficam cheias de IFs testando variaveis; na arvore as
+regras ficam organizadas por PRIORIDADE, de cima para baixo.
+
+
+2. OS QUATRO TIPOS DE NO
+------------------------
+Todo no, ao ser executado (tick), devolve um BTResult:
+      success  (deu certo ou nao)
+      command  (string; vazia = "nenhum comando")
+
+  Condition(nome)  sucesso se o contexto tem "nome" com valor != 0.
+                   Nao carrega comando. (Folha: "pergunta".)
+  Action(comando)  SEMPRE sucesso, e carrega o comando.
+                   (Folha: "resposta".)
+  Sequence(a,b,..) executa os filhos da esquerda para a direita.
+                   Para e FALHA no primeiro filho que falhar.
+                   Sucesso se todos tiverem sucesso, carregando o
+                   ULTIMO comando nao vazio produzido pelos filhos.
+                   Funciona como um E (AND): "se A e B entao faca C".
+  Selector(a,b,..) executa os filhos da esquerda para a direita.
+                   Para no primeiro filho com SUCESSO e carrega o comando
+                   dele. Falha so se todos falharem.
+                   Funciona como um OU (OR) com prioridade: "tente isto;
+                   se nao der, tente aquilo".
+
+  Exemplo do professor (teste.cpp):
+
+    Selector(
+      Sequence(Condition("Passou"), Action("FechePorta")),
+      Sequence(Condition("NaPorta"), Condition("PortaAberta"), Action("Passe")),
+      Sequence(Condition("NaPorta"), Condition("PortaDestrancada"),
+               Condition("PortaFechada"), Action("AbrirPorta")),
+      Sequence(Condition("NaPorta"), Condition("PortaTrancada"), Action("DestranquePorta")),
+      Action("CaminhePorta") )
+
+    contexto { NaPorta=1, PortaTrancada=1, PortaFechada=1 }:
+      1a Sequence: "Passou" nao existe -> falha
+      2a Sequence: NaPorta ok, "PortaAberta" nao existe -> falha
+      3a Sequence: NaPorta ok, "PortaDestrancada" nao existe -> falha
+      4a Sequence: NaPorta ok, PortaTrancada ok, Action -> SUCESSO
+      O Selector para aqui e devolve "DestranquePorta".
+      (O Action("CaminhePorta") nem e executado.)
+
+  O ultimo filho do Selector ser um Action sozinho e um padrao: como
+  Action sempre tem sucesso, ele e o "senao" final (comportamento padrao).
+
+  E o mesmo que esta cadeia de ifs (a "versao intuitiva" do PDF):
+      if (Passou)                                  return "FechePorta";
+      if (NaPorta && PortaAberta)                  return "Passe";
+      if (NaPorta && PortaDestrancada && PortaFechada) return "AbrirPorta";
+      if (NaPorta && PortaTrancada)                return "DestranquePorta";
+      return "CaminhePorta";
+
+
+3. IMPLEMENTACAO
+----------------
+
+3.1 Hierarquia de classes (polimorfismo)
+
+    class BTNode {                      // classe base ABSTRATA
+        virtual ~BTNode() = default;
+        virtual BTResult tick(const BTContext&) const = 0;
+    };
+    class SelectorNode  : public BTNode { ... tick(...) const override; };
+    class SequenceNode  : public BTNode { ... };
+    class ConditionNode : public BTNode { ... };
+    class ActionNode    : public BTNode { ... };
+
+  - "= 0" torna tick() PURAMENTE VIRTUAL: BTNode nao pode ser criado
+    sozinho, so as subclasses.
+  - Selector e Sequence guardam os filhos como vector<unique_ptr<BTNode>>
+    e chamam child->tick(context) sem saber se o filho e Condition,
+    Action ou outro Selector: a chamada virtual escolhe a versao certa
+    em tempo de execucao. E isso que torna a arvore RECURSIVA.
+  - O destrutor virtual garante que, ao destruir um unique_ptr<BTNode>,
+    seja chamado o destrutor da subclasse certa (que libera os filhos).
+  - Todos os tick() sao const: avaliar a arvore nao a modifica (ela e
+    sem estado).
+
+3.2 Construtores
+
+    SelectorNode::SelectorNode(std::vector<BTNodePtr> children)
+        : m_children(std::move(children)) {}
+
+  - unique_ptr NAO pode ser copiado, so MOVIDO. Por isso o vetor de
+    filhos e recebido por valor e movido para o membro: nenhuma copia,
+    e a posse dos filhos passa para o no.
+  - Condition e Action fazem o mesmo com a std::string.
+
+3.3 SelectorNode::tick
+
+    for (const BTNodePtr& child : m_children) {
+        BTResult result = child->tick(context);
+        if (result.success) return result;     // 1o sucesso ganha
+    }
+    return BTResult{};                         // todos falharam
+
+  - Devolve o resultado do filho inteiro: sucesso + comando dele.
+  - BTResult{} usa os valores padrao do header: success = false,
+    command = "". Ou seja, falha sem comando.
+  - Selector vazio (sem filhos): o laco nao roda, retorna falha.
+
+3.4 SequenceNode::tick
+
+    BTResult result{ true, "" };
+    for (const BTNodePtr& child : m_children) {
+        BTResult childResult = child->tick(context);
+        if (!childResult.success) return BTResult{};      // 1a falha
+        if (!childResult.command.empty())
+            result.command = std::move(childResult.command); // guarda o ULTIMO
+    }
+    return result;
+
+  - Comeca como sucesso; se algum filho falhar, a sequencia falha na hora
+    (os filhos seguintes nem sao executados).
+  - "ultimo comando nao vazio": Conditions nao tem comando, entao numa
+    Sequence(Condition, Condition, Action) o comando e o da Action. Se
+    houver duas Actions, fica o da ultima.
+  - Na falha devolvo comando vazio: uma falha significa "nenhum comando".
+    (O Selector ignora filhos que falharam e tick() devolve "" quando a
+    raiz falha, entao isso nunca muda o comando final.)
+  - Sequence vazia: nenhum filho falhou, entao e sucesso sem comando.
+  - std::move aqui so evita copiar a string do resultado temporario.
+
+3.5 ConditionNode::tick
+
+    const bool found = std::any_of(context.begin(), context.end(),
+        [this](const std::pair<std::string, int>& fact) {
+            return fact.first == m_name && fact.second != 0;
+        });
+    return BTResult{ found, "" };
+
+  - Procura no contexto um fato com o nome certo e valor != 0.
+  - std::any_of (de <algorithm>) devolve true se ALGUM elemento satisfaz
+    a condicao, e para no primeiro que satisfizer.
+  - A condicao e uma LAMBDA: uma funcao anonima escrita no lugar.
+    [this] e a "captura": permite usar m_name (membro do objeto) dentro
+    da lambda.
+  - Fato ausente e fato com valor 0 dao o mesmo resultado: falso. Assim o
+    contexto do PDF { {"NaPorta", 0}, ... } funciona igual a nao ter
+    "NaPorta" na lista.
+  - Busca linear: o contexto tem poucos fatos, entao e mais simples (e
+    mais rapido na pratica) que um std::map.
+
+3.6 ActionNode::tick
+
+    return BTResult{ true, m_command };
+
+  - Sempre sucesso. O contexto nao e usado: o nome do parametro foi
+    comentado (/*context*/) para o compilador nao avisar "parametro nao
+    usado".
+
+3.7 BehaviorTree
+
+    BehaviorTree::BehaviorTree(BTNodePtr root) : m_root(std::move(root)) {}
+
+    std::string BehaviorTree::tick(const BTContext& context) const {
+        if (!m_root) return "";
+        BTResult result = m_root->tick(context);
+        return result.success ? result.command : "";
+    }
+
+  - Dono da raiz (e portanto da arvore inteira).
+  - Raiz falhou => "" ("nenhum comando neste tick"), como o contrato pede.
+  - Raiz nula (BehaviorTree(nullptr)) => "" tambem, em vez de travar.
+
+
+4. AS FUNCOES AUXILIARES DO HEADER (ja prontas)
+-----------------------------------------------
+  Condition("x"), Action("x"), Selector(...), Sequence(...) estao no .hpp
+  e permitem escrever a arvore aninhada, parecida com o desenho:
+
+    template <class... Children>
+    BTNodePtr Selector(Children&&... children) {
+        std::vector<BTNodePtr> v;
+        (v.emplace_back(std::forward<Children>(children)), ...);
+        return std::make_unique<SelectorNode>(std::move(v));
+    }
+
+  - "class... Children" e um TEMPLATE VARIADICO: aceita qualquer
+    quantidade de argumentos.
+  - "(v.emplace_back(...), ...);" e uma FOLD EXPRESSION (C++17): repete
+    emplace_back para cada argumento, em ordem. Ou seja, monta o vetor de
+    filhos.
+  - std::forward repassa cada argumento mantendo-o "movivel" (os
+    unique_ptr temporarios sao movidos para o vetor).
+  - Isso e o que o PDF chama de "vetores de objetos dentro de objetos":
+    cada chamada Sequence(...) constroi um vetor com os filhos e o
+    entrega ao construtor do no.
+  - Condition e Action sao "inline" porque estao definidas no header
+    (sem inline, cada .cpp que incluisse o header teria uma copia e o
+    linker reclamaria).
+
+
+5. RECURSOS DE C++ USADOS
+-------------------------
+  virtual / = 0 / override  polimorfismo: classe base abstrata e
+                         subclasses que sobrescrevem tick().
+  virtual ~BTNode()      destrutor virtual em classe base polimorfica.
+  std::unique_ptr        posse exclusiva; so pode ser movido.
+  std::move              transfere vetores, strings e ponteiros sem copiar.
+  explicit               construtor com 1 parametro que nao vira conversao
+                         automatica (BehaviorTree t = algumNo; nao compila).
+  lambda [this](...){}   funcao anonima com captura.
+  std::any_of            algoritmo da biblioteca padrao.
+  BTResult{}             inicializacao com os valores padrao dos membros.
+  template variadico + fold expression  (nas funcoes do header).
+
+
+6. COMO TESTEI
+--------------
+g++ -std=c++17 -Wall -Wextra -Wpedantic -Werror -fsanitize=address,undefined
+  - a arvore do teste.cpp com o contexto do professor -> "DestranquePorta";
+  - os outros ramos: "AbrirPorta", "Passe", "FechePorta" (prioridade: o
+    primeiro ramo ganha mesmo com outras condicoes verdadeiras) e
+    contexto vazio -> "CaminhePorta";
+  - contexto do PDF (NaPorta = 0, Escudo, Energia) -> "CaminhePorta";
+  - valor negativo conta como verdadeiro;
+  - nos isolados: Condition com fato ausente / valor 0 / valor 1; Action;
+    Sequence vazia (sucesso) e Selector vazio (falha); Sequence com duas
+    Actions carrega a ULTIMA; Selector carrega o comando do filho que
+    teve sucesso (mesmo vazio);
+  - raiz que falha e raiz nula -> "";
+  - arvore aninhada (Selector dentro de Sequence dentro de Selector);
+  - a patrulha do teste2.cpp, sem graficos: 1000 ticks, o NPC vai e
+    volta entre x = 100 e x = 200, invertendo a direcao varias vezes.

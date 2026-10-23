@@ -1,0 +1,104 @@
+ENTITY - COMO FOI FEITA A IMPLEMENTACAO
+=======================================
+
+Arquivos: source/Entity.hpp (contrato) e source/Entity.cpp.
+Depende de Global, Vector2D, RigidBody2D e Collision2D.
+
+
+1. O QUE E
+----------
+Uma SUPER-CLASSE para "qualquer coisa que existe no mundo do jogo"
+(jogador, NPC, item...). Como o professor disse, e so para ORGANIZACAO:
+junta pecas que ja estavam prontas.
+
+    struct Entity {
+        RigidBody2D body;        // posicao, velocidade, aceleracao (fase 2)
+        Collision2D collision;   // caixa de colisao 64x64      (fase 2)
+        bool        active{true};
+        EntityId    id{0};
+        virtual ~Entity() = default;
+        AABB bounds() const noexcept { return collision.bounds(body.position); }
+    };
+
+
+2. POR QUE O Entity.cpp E (QUASE) VAZIO
+--------------------------------------
+O header ja define TUDO:
+  - os membros sao dados publicos (nao ha metodos para implementar);
+  - o destrutor e "= default" (o compilador gera);
+  - bounds() tem o corpo dentro do header (funcao definida dentro da
+    struct e automaticamente inline).
+Nao ha nenhuma funcao so DECLARADA esperando implementacao, como havia
+nas fases anteriores. Se eu escrevesse uma definicao de bounds() no .cpp,
+daria erro de redefinicao.
+
+O Entity.cpp existe para:
+  - manter o padrao "um .cpp por classe" que o professor usa para
+    compilar os projetos;
+  - garantir que Entity.hpp compila SOZINHO, ou seja, que ele inclui tudo
+    o que usa (EntityId vem de Global.hpp, AABB de Collision2D.hpp...).
+    Se faltasse um include, o Entity.cpp nao compilaria.
+
+
+3. ENTENDENDO CADA PARTE
+------------------------
+
+3.1 Composicao: "uma Entity TEM um corpo e TEM uma colisao"
+  - body e collision sao MEMBROS, nao classes base. Isso e COMPOSICAO
+    ("tem um"), diferente de HERANCA ("e um").
+  - Entity nao e um RigidBody2D; ela tem um. Para mover:
+        entidade.body.velocity = {50, 0};
+        entidade.body.integrate(dt);
+  - Por isso RigidBody2D so guarda posicao: o tamanho da caixa fica no
+    Collision2D, e a Entity junta os dois.
+
+3.2 bounds()
+    return collision.bounds(body.position);
+  - Atalho: a caixa de colisao no mundo = forma (halfExtents) centrada na
+    posicao atual do corpo. Ex.: posicao (100,100), padrao 64x64:
+        min = (68, 68)   max = (132, 132).
+  - Para testar colisao entre duas entidades:
+        a.bounds().intersects(b.bounds())
+
+3.3 active
+  - Quando false, simulacao e colisao devem ignorar a entidade (ex.: um
+    inimigo morto). Mais barato que apagar e recriar o objeto.
+  - "{true}": inicializador padrao, toda Entity nasce ativa.
+
+3.4 id
+  - EntityId e "int" (using EntityId = int; em Global.hpp).
+  - 0 = "ainda sem id". Global.hpp reserva PLAYER_ID = 100 para o jogador
+    e os ids automaticos comecam em INITIAL_ENTITY_ID = 1000, entao nunca
+    se misturam.
+
+3.5 virtual ~Entity() = default;
+  - DESTRUTOR VIRTUAL: Entity sera classe base (NPC herda dela). Se o jogo
+    guardar entidades como ponteiros para a base, por exemplo
+        std::vector<std::unique_ptr<Entity>> mundo;
+        mundo.push_back(std::make_unique<NPC>());
+    ao destruir, o C++ precisa chamar o destrutor de NPC (que libera o
+    sprite). Sem "virtual", chamaria so o de Entity: comportamento
+    indefinido.
+  - Regra pratica: classe feita para ser herdada e usada por ponteiro da
+    base => destrutor virtual.
+  - Efeito colateral: a classe passa a ter uma tabela de funcoes virtuais
+    (vtable), entao deixa de ser um "agregado" simples. Na pratica:
+    crie e depois atribua os campos (Entity e; e.id = 5;) em vez de
+    Entity{...}.
+
+
+4. RECURSOS DE C++ USADOS
+-------------------------
+  struct com membros de outros tipos  composicao.
+  virtual ~Entity() = default         destrutor virtual gerado pelo
+                                      compilador.
+  funcao definida dentro da struct    automaticamente inline.
+  inicializadores padrao {true}, {0}  valores iniciais dos membros.
+  EntityId (using)                    apelido de tipo vindo de Global.hpp.
+
+
+5. COMO TESTEI
+--------------
+g++ -std=c++17 -Wall -Wextra -Wpedantic -Werror -fsanitize=address,undefined
+  - Entity nova: active == true e id == 0;
+  - posicao (100,100): bounds() == { (68,68), (132,132) }.

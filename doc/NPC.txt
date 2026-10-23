@@ -1,0 +1,103 @@
+NPC - COMO FOI FEITA A IMPLEMENTACAO
+====================================
+
+Arquivos: source/NPC.hpp (contrato) e source/NPC.cpp.
+Depende de Entity e da biblioteca SFML (modulo Graphics), versao 2.x.
+
+
+1. O QUE E
+----------
+Um NPC (Non-Player Character, personagem que nao e o jogador) e uma
+Entity com uma imagem para aparecer na tela:
+
+    struct NPC : Entity {
+        sf::Sprite sprite;
+    };
+
+  - "struct NPC : Entity" e HERANCA: um NPC E uma Entity. Ele herda body,
+    collision, active, id e bounds(), e acrescenta o sprite.
+  - Em struct a heranca e public por padrao (em class seria private).
+  - Igual a Entity, e so organizacao: nao ha metodos para implementar.
+
+
+2. POR QUE O NPC.cpp E (QUASE) VAZIO
+-----------------------------------
+O header ja define tudo (um unico membro publico; destrutor herdado da
+Entity, que e virtual). Nao ha funcao declarada esperando implementacao.
+
+O NPC.cpp existe para manter "um .cpp por classe" e para garantir que
+NPC.hpp compila sozinho, incluindo <SFML/Graphics.hpp>. Para compilar e
+preciso ter o SFML instalado:
+      sudo apt install libsfml-dev        (Ubuntu: SFML 2.6)
+
+
+3. SPRITE, TEXTURA E O GAME LOOP
+--------------------------------
+  - sf::Texture e a IMAGEM carregada (fica na memoria da placa de video).
+  - sf::Sprite e um "carimbo" que DESENHA uma textura numa posicao. O
+    sprite NAO guarda a imagem, so um PONTEIRO para a textura.
+
+  Uso tipico (no programa do jogo, fora da biblioteca):
+
+    sf::Texture textura;
+    textura.loadFromFile("um-quadrado.png");   // imagem 64x64
+
+    NPC npc;
+    npc.sprite.setTexture(textura);
+    npc.sprite.setOrigin(32.f, 32.f);          // centro da imagem 64x64
+
+    // a cada frame:
+    npc.body.integrate(dt);                    // fisica (RigidBody2D)
+    npc.sprite.setPosition(npc.body.position.x, npc.body.position.y);
+    window.draw(npc.sprite);
+
+  CUIDADOS IMPORTANTES:
+  1. A textura precisa continuar existindo enquanto o sprite for usado.
+     Se a textura for uma variavel local de uma funcao que ja terminou,
+     o sprite aponta para memoria liberada (o famoso "quadrado branco"
+     do SFML). Por isso a textura fica no programa principal, e os NPCs
+     so apontam para ela. Varios NPCs podem usar a MESMA textura.
+  2. setOrigin(32, 32): por padrao o SFML desenha a partir do canto
+     superior esquerdo. Mas no projeto body.position e o CENTRO da
+     entidade (Collision2D centra a caixa na posicao). Com a origem no
+     centro da imagem, sprite e caixa de colisao ficam alinhados.
+  3. Separacao de responsabilidades: a posicao "verdadeira" e
+     body.position (fisica). O sprite so COPIA essa posicao para
+     desenhar. Nunca o contrario.
+  4. Por que o header exige SFML 2.x: no SFML 3 o sf::Sprite nao tem
+     construtor sem textura, entao "sf::Sprite sprite;" nao compilaria.
+
+
+4. RECURSOS DE C++ USADOS
+-------------------------
+  struct NPC : Entity     heranca publica.
+  destrutor virtual herdado  (ver doc/Entity.txt) permite destruir um NPC
+                          por um ponteiro para Entity.
+  biblioteca externa      #include <SFML/Graphics.hpp>; na hora de ligar
+                          (linkar): -lsfml-graphics -lsfml-window
+                          -lsfml-system.
+
+
+5. COMO TESTEI
+--------------
+Com SFML 2.6.1 (libsfml-dev no Ubuntu 24.04):
+  - NPC.cpp compila sozinho com -Wall -Wextra -Wpedantic -Werror;
+  - os 9 .cpp do projeto compilam e ligam juntos com o mesmo comando do
+    script do professor (g++ -std=c++17 -I. ...) + -lsfml-graphics
+    -lsfml-window -lsfml-system;
+  - um NPC guardado como std::unique_ptr<Entity> e destruido pela base
+    (destrutor virtual), sem erro no sanitizer de memoria;
+  - programas de teste FORA do GitHub (como o professor pediu):
+      * quadrado de 64x64 (um-quadrado.png) movido pelas setas, usando
+        body.velocity + body.integrate(dt) com dt fixo de 1/60 s;
+      * patrulha do teste2.cpp: o NPC vai e volta entre dois pontos,
+        comandado pela BehaviorTree.
+
+Observacao sobre o teste2.cpp: o pseudocodigo so coloca "IndoParaA" ou
+"IndoParaB" no contexto. Os fatos "ChegouPontoA" e "ChegouPontoB" nunca
+sao preenchidos, entao o NPC nunca inverteria a direcao. Na minha versao o
+jogo calcula esses fatos a partir da posicao do NPC antes de cada tick:
+      ChegouPontoA = indo para A  e  x >= xA
+      ChegouPontoB = indo para B  e  x <= xB
+Isso mostra o papel de cada parte: a ARVORE so decide; quem observa o
+mundo e monta o contexto e o codigo do jogo.
